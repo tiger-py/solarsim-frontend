@@ -1,0 +1,26 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # If your site is just static files in repo root, no build step needed.
+      # If you have a build output folder, change `publish_dir` below accordingly.
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: .
+          force_orphan: true
