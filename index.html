@@ -3265,105 +3265,53 @@ return lastBeamTransmittance;
       window._shadingMetrics = () => ({ tau_under_array: lastBeamTransmittanceUnderArray, tau_full: lastBeamTransmittanceFull, tau: lastBeamTransmittance });
 
 
-// Build representative shading samples (12 months × 3 hours) using GPU shadow mask.
-// Returns [{time_utc, tau, weight_hours}, ...] suitable for /simulate_shaded.
 async function buildShadingSamplesGPU({ year, lat, lon, mode = "interactive" }) {
-  const hours = [9, 12, 15];
+  const samples = [];
   const day = 15;
 
-  // Optionally adjust sampling RT resolution if helper exists
-  if (typeof setShadowSamplingResolution === "function") {
-    setShadowSamplingResolution(mode === "final" ? shadowResFinal : shadowResInteractive);
-  }
-
-  const samples = [];
-
-  // Preserve current sun direction to restore after sampling
   const savedAz = lastSunAzDeg;
   const savedEl = lastSunElDeg;
 
   for (let m = 1; m <= 12; m++) {
     const dim = daysInMonthUTC(year, m);
-    // One representative sample per month at (approx) solar noon; weight as full month hours.
     const hrNoon = approxSolarNoonUtcHourFromLon(lon);
     const weightHoursPerSample = dim * 24.0;
 
-    {
-      const hr = hrNoon;
-      const time_utc = isoUtcNoZ(year, m, day, hr);
-      const t = new Date(Date.UTC(year, m - 1, day, hr, 0, 0));
+    const hr = hrNoon;
+    const time_utc = isoUtcNoZ(year, m, day, hr);
+    const t = new Date(Date.UTC(year, m - 1, day, hr, 0, 0));
 
-      // Use the app's existing NOAA-style solar position helper
-      const sp = solarPositionApproxUTC(t, Number(lat), Number(lon));
-      const elRad = (Math.PI / 2) - sp.zenRad;
-      if (!Number.isFinite(elRad) || elRad <= 0.01) continue; // skip night
+    const sp = solarPositionApproxUTC(t, Number(lat), Number(lon));
+    const elRad = (Math.PI / 2) - sp.zenRad;
+    if (!Number.isFinite(elRad) || elRad <= 0.01) continue;
 
-      const azDeg = sp.azRad * 180 / Math.PI;
-      const elDeg = elRad * 180 / Math.PI;
+    const azDeg = sp.azRad * 180 / Math.PI;
+    const elDeg = elRad * 180 / Math.PI;
 
-      setSunDirectionFromAzEl(azDeg, elDeg);
+    setSunDirectionFromAzEl(azDeg, elDeg);
+    await nextFrame();
 
-      // Let one frame render so shadows update
-      await nextFrame();
+    const tau = (typeof computeBeamTransmittanceGPU === "function")
+      ? Number(computeBeamTransmittanceGPU())
+      : 1.0;
 
-      const tauShadow = computePvTransmittanceRaycast({ nx, ny }); // returns tau_shadow (mask)
-       if (!Number.isFinite(tauShadow)) continue;
-       tauShadowAcc += tauShadow;
- 
-       const fb = Number(window.__pvLastFacing?.f_beam);
-       if (Number.isFinite(fb)) fBeamAcc += fb;
-       else fBeamAcc += tauShadow; // fallback
- 
-       nAcc += 1;
-      }
+    if (!Number.isFinite(tau)) continue;
 
-      if (nAcc <= 0) continue;
-  
-     const tauShadowMean = tauShadowAcc / nAcc;
-     const fBeamMean = fBeamAcc / nAcc;
-
-
-      if (window.DEBUG_SHADING) {
-        // If tau is derived from multiple internal stats, log those too
-        const sm = (typeof window._shadingMetrics === "function") ? window._shadingMetrics() : null;
-
-        console.log("[SAMPLE DEBUG]", {
-          mode,
-          month: m,
-          time_utc,
-          sun: { azDeg: +azDeg.toFixed(2), elDeg: +elDeg.toFixed(2) },
-          elev_m: elevationEl ? Number(elevationEl.value) : null,
-          az_ui: azimuthEl ? Number(azimuthEl.value) : null,
-          tau: +Number(tau).toFixed(4),
-          tau_under_array: sm ? +Number(sm.tau_under_array).toFixed(4) : null,
-          tau_full: sm ? +Number(sm.tau_full).toFixed(4) : null
-        });
-      }
-
-      samples.push({
-        time_utc,
-       // IMPORTANT:
-       // - tau is what backend currently consumes as PV factor (pv_factor()).
-       // - We want tau = f_beam_mean (incidence-weighted beam availability).
-       tau: Number(fBeamMean),
-       tau_shadow: Number(tauShadowMean),
-       f_beam: Number(fBeamMean),
-        weight_hours: weightHoursPerSample
-      });
-    }
-
-// Restore previous sun (so interactive view doesn't jump after sampling)
-    if (Number.isFinite(savedAz) && Number.isFinite(savedEl)) {
-      setSunDirectionFromAzEl(savedAz, savedEl);
-      await nextFrame();
-      // If you use GPU beam preview elsewhere, keep this
-      if (typeof computeBeamTransmittanceGPU === "function") {
-        computeBeamTransmittanceGPU();
-      }
-    }
-  
-    return samples;
+    samples.push({
+      time_utc,
+      tau: Math.max(0, Math.min(1, tau)),
+      weight_hours: weightHoursPerSample
+    });
   }
+
+  // restore sun
+  if (Number.isFinite(savedAz) && Number.isFinite(savedEl)) {
+    setSunDirectionFromAzEl(savedAz, savedEl);
+    await nextFrame();
+  }
+
+  return samples;
+}
 
 // ============================================================
 // PV-plane shading samples (Option 4): tau_pv via raycasting
@@ -5083,7 +5031,7 @@ function clearArrayGroup() {
 
         // Convention: 0°=N, 90°=E, 180°=S, 270°=W
         // Base geometry faces +Z, so rotate so 180° faces "South".
-        if (tiledRoot) tiledRoot.rotation.y = azRad - Math.PI;
+        if (tiledRoot) tiledRoot.rotation.y = azRad;
         wavesGroup.rotation.y = 0;
         // Hemisphere mirroring for Solar Waves:
         // The wave fold sequence is authored in a fixed local X direction. In the Southern Hemisphere,
@@ -5373,7 +5321,7 @@ function makePanelTemplateFromMeta(meta) {
         // This makes azimuth a pure spin of the already-tilted plane.
         roofGroup.rotation.set(0, 0, 0);
         // Global azimuth is applied to tiledRoot so tiled arrays rotate together
-        if (tiledRoot) tiledRoot.rotation.y = azRad - Math.PI;
+        if (tiledRoot) tiledRoot.rotation.y = azRad;
         dbgFrame("roof", {lat: currentLocation && currentLocation.lat, az: azDegNorm, rotY: roofGroup.rotation.y});
         roofGroup.rotateX(-tiltRad);
 
