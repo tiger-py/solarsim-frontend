@@ -34,17 +34,22 @@
     #app {
       display: grid;
 
-      /* Right panel width (adjust once here) */
+      /* Base control width (left sidebar is 2× this) */
       --rightW: 300px;
 
-      /* Left panel = 2 × right panel */
-      grid-template-columns: calc(var(--rightW) * 2) minmax(0, 1fr) var(--rightW);
+      grid-template-columns: calc(var(--rightW) * 2) minmax(0, 1fr);
+      /* Main viewport + results stacked in the right-hand column */
+      grid-template-rows: minmax(0, 1fr) 260px;
+      grid-template-areas:
+        "sidebar main"
+        "sidebar results";
 
       height: 100vh;
       width: 100vw;
     }
 
     #sidebar {
+      grid-area: sidebar;
       background: var(--sidebar-bg);
       border-right: 1px solid var(--border-subtle);
       padding: 14px 14px 18px;
@@ -66,13 +71,14 @@
 
     /* Right results panel (mirrors sidebar) */
     #rightbar {
-      background: var(--sidebar-bg);
-      border-left: 1px solid var(--border-subtle);
+      grid-area: results;
+      background: transparent;
+      border-left: none;
+      border-top: 1px solid var(--border-subtle);
       padding: 14px 14px 18px;
       display: flex;
       flex-direction: column;
       gap: 14px;
-      height: 100vh;
       overflow: hidden; /* panel doesn't scroll; card scrolls */
       box-sizing: border-box;
     }
@@ -283,6 +289,7 @@
 
     /* Main 3D area */
     #main {
+      grid-area: main;
       position: relative;
       background: #d2d6df;
     }
@@ -295,8 +302,8 @@
       width: auto;
       z-index: auto;
 
-      /* stretch to bottom via rightbar flex */
-      flex: 1 1 auto;
+      /* Fill the results row */
+      height: 100%;
       overflow-y: auto;
 
       /* original green styling */
@@ -711,9 +718,6 @@
     <input id="groundArrayY" max="10" min="1" step="1" type="range" value="1"/>
   </div>
   </div>
-  <div class="small-note" style="margin-top:6px;color: var(--text-muted);">
-    On Ground only. Copies are spaced 1.25 m apart (edge-to-edge).
-  </div>
 </div>
 <div class="row stacked">
 <label for="surfaceType">On Ground or over Water</label>
@@ -753,9 +757,9 @@
     <h2>Results</h2>
     <ul class="metric-list" style="margin-top:4px;">
       <li><span class="metric-label">Total panels:</span><span class="metric-value" id="metricPanels">–</span></li>
-      <li><span class="metric-label">Power Output per Annum:</span><span class="metric-value" id="metricAnnual">–</span></li>
-      <li><span class="metric-label">Water saved:</span><span class="metric-value" id="metricWaterSaved">–</span></li>
-      <li id="metricWaterCollectedRow" style="display:none;"><span class="metric-label">Rainwater collected (annual):</span><span class="metric-value" id="metricWaterCollected">–</span></li>
+      <li><span class="metric-label">Power generated over one year:</span><span class="metric-value" id="metricAnnual">–</span></li>
+      <li><span class="metric-label">Water saved by shading over one year:</span><span class="metric-value" id="metricWaterSaved">–</span></li>
+      <li id="metricWaterCollectedRow" style="display:none;"><span class="metric-label">Rainwater collected over one year:</span><span class="metric-value" id="metricWaterCollected">–</span></li>
     </ul>
     <div class="small-note" id="resultsStatus" style="margin-top:8px;color: var(--text-muted);"></div>
 
@@ -4601,18 +4605,18 @@ yawParent.updateMatrixWorld(true);
 
         const abs = Math.abs(v);
 
-        if (abs >= 1e12) return (v / 1e12).toFixed(2) + " TL/yr";
-        if (abs >= 1e9)  return (v / 1e9).toFixed(2)  + " GL/yr";
-        if (abs >= 1e6)  return (v / 1e6).toFixed(2)  + " ML/yr";
-        if (abs >= 1e3)  return (v / 1e3).toFixed(2)  + " kL/yr";
+        if (abs >= 1e12) return (v / 1e12).toFixed(2) + " TL per year";
+        if (abs >= 1e9)  return (v / 1e9).toFixed(2)  + " GL per year";
+        if (abs >= 1e6)  return (v / 1e6).toFixed(2)  + " ML per year";
+        if (abs >= 1e3)  return (v / 1e3).toFixed(2)  + " kL per year";
 
-        return v.toFixed(0) + " L/yr";
+        return v.toFixed(0) + " Liters per year";
       }
 
       // Format annual energy in MWh
       function formatAnnual(mwh) {
         if (!Number.isFinite(mwh)) return "–";
-        return Number(mwh).toFixed(2) + " MWh";
+        return Number(mwh).toFixed(2) + " Megawatt-hour per year";
       }
 
       function _fmtNumber(n, digits = 0) {
@@ -4648,7 +4652,7 @@ yawParent.updateMatrixWorld(true);
 
           if (Number.isFinite(annualKwh)) {
              const mwh = annualKwh / 1000.0;
-             _setText("metricAnnual", `${_fmtNumber(mwh, 2)} MWh`);
+             _setText("metricAnnual", `${_fmtNumber(mwh, 2)} Megawatt-hour per year`);
            } else {
              _setText("metricAnnual", "–");
            }
@@ -4656,20 +4660,12 @@ yawParent.updateMatrixWorld(true);
           const waterSavedLpy = data.water_saved_lpy;
           const waterSavedPct = data.water_saved_pct != null ? Number(data.water_saved_pct) : null;
           if (waterSavedLpy != null && Number.isFinite(Number(waterSavedLpy)) && Number(waterSavedLpy) > 0) {
-            _setText("metricWaterSaved", `${_fmtNumber(waterSavedLpy, 0)} L/yr`);
+            _setText("metricWaterSaved", `${_fmtNumber(waterSavedLpy, 0)} Liters per year`);
           } else if (waterSavedPct != null && Number.isFinite(waterSavedPct) && waterSavedPct > 0) {
             _setText("metricWaterSaved", `${_fmtNumber(waterSavedPct, 1)}%`);
           } else {
             _setText("metricWaterSaved", "–");
           }
-
-          // Status line: show SVF and whether water area is nonzero when in water mode
-          const svf = data?.shading?.svf;
-          const area = data?.water_area_m2;
-          let status = "Simulation complete.";
-          if (svf != null && Number.isFinite(Number(svf))) status += ` SVF=${Number(svf).toFixed(3)}.`;
-          if (area != null && Number.isFinite(Number(area))) status += ` Water area=${Number(area).toFixed(2)} m².`;
-            _setText("resultsStatus", status);
  
             // Clear error UI on success
             _setText("simError", "");
@@ -4876,6 +4872,17 @@ async function loadPanelsMeta() {
             opt.textContent = p.name || p.id || `Panel ${i+1}`;
             panelTypeEl.appendChild(opt);
           });
+
+          // Default selection: ASLAN 550W
+          try {
+            const defIdx = panelsMeta.findIndex(p => {
+              const m = String(p.manufacturer || "").toLowerCase();
+              const pw = Number(p.rated_power_w);
+              return (m.includes("aslan") && pw === 550);
+            });
+            if (defIdx >= 0) panelTypeEl.value = String(defIdx);
+          } catch (_) {}
+
         } catch (e) {
           console.warn("Failed to load panels.json, using fallback panel library.", e);
           panelsMeta = [{ name: "Generic 1.0×1.6 m, 200 W", width_m: 1.0, height_m: 1.6, thickness_m: 0.035, rated_power_w: 200, noct: 45, gamma_pmp: -0.0035 }];
@@ -6883,7 +6890,7 @@ window.dumpSizes = function dumpSizes() {
       const y = data.year;
 
       if (Number.isFinite(m3) && Number.isFinite(L)) {
-        valueEl.textContent = `${fmt0(L)} L`;
+        valueEl.textContent = `${fmt0(L)} Liters per year`;
       } else {
         valueEl.textContent = "–";
       }
