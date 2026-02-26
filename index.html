@@ -701,7 +701,7 @@
 <input id="elevation" max="10.0" min="0.0" step="0.1" type="range" value="0.6"/>
 </div>
 <div id="groundTilingControls" style="margin-top:8px;">
-  <div id="groundTilingControls">
+  <div class="groundTilingControlsInner">
 
   <div class="slider-block">
     <div class="slider-header">
@@ -732,6 +732,13 @@
 <span class="value"><span id="waterWidthVal">5.0 m</span></span>
 </div>
 <input id="waterWidth" max="20.0" min="1.0" step="0.5" type="range" value="5.0"/>
+</div>
+<div class="slider-block" id="waterCopiesRow" style="display:none;">
+  <div class="slider-header">
+    <span>Number of Arrays (along canal)</span>
+    <span class="value"><span id="waterCopiesVal">1</span></span>
+  </div>
+  <input id="waterCopies" max="50" min="1" step="1" type="range" value="1"/>
 </div>
 <div id="simError"></div>
 </div>
@@ -1008,11 +1015,14 @@ const downloadBtn = document.getElementById("downloadBtn");
       const groundArrayYValEl = document.getElementById("groundArrayYVal");
 
       const surfaceTypeEl = document.getElementById("surfaceType");
-const surfaceEl = surfaceTypeEl; // alias for legacy references
+      const surfaceEl = surfaceTypeEl; // alias for legacy references
 
       const waterWidthEl = document.getElementById("waterWidth");
       const waterWidthValEl = document.getElementById("waterWidthVal");
       const waterWidthRowEl = document.getElementById("waterWidthRow");
+      const waterCopiesEl = document.getElementById("waterCopies");
+      const waterCopiesValEl = document.getElementById("waterCopiesVal");
+      const waterCopiesRowEl = document.getElementById("waterCopiesRow");
 
       const simErrorEl = document.getElementById("simError");
       const simStatusEl = document.getElementById("simStatus");
@@ -1057,6 +1067,8 @@ const surfaceEl = surfaceTypeEl; // alias for legacy references
       let _realtimeUpdateToken = 0;
 
       let panelMeshes = [];
+      // Render/interaction list (base + visual copies). Simulation must NOT depend on this.
+      let renderPanelMeshes = [];
       let basePanelMeshes = []; // base (single) array panels before ground tiling
       let baseArrayPrototype = null; // detached clone source for ground tiling (prevents scene graph recursion)
       // Expose live panel mesh list for console debugging (getter stays valid across rebuilds)
@@ -1064,6 +1076,11 @@ const surfaceEl = surfaceTypeEl; // alias for legacy references
         Object.defineProperty(window, 'panelMeshes', { configurable: true, get: () => panelMeshes });
       } catch (e) {
         window.panelMeshes = panelMeshes;
+      }
+      try {
+        Object.defineProperty(window, "renderPanelMeshes", { configurable: true, get: () => renderPanelMeshes });
+      } catch (e) {
+        window.renderPanelMeshes = renderPanelMeshes;
       }
       let groundSize = 20;
       let waterWidthM = 5.0; // adjustable canal/lake width in meters (surface stays centered)
@@ -2061,12 +2078,16 @@ if (wR) {
       }
 
       function applyRenderModeToPanels() {
-        if (!panelMeshes || !panelMeshes.length) return;
+        // Always prefer renderPanelMeshes so clones receive materials
+        const targets = (renderPanelMeshes && renderPanelMeshes.length)
+          ? renderPanelMeshes
+          : panelMeshes;
+        if (!targets || !targets.length) return;
 
         if (currentRenderMode === 'textures') {
           // Ensure PBR/procedural texture materials are ready before assignment (prevents race where panels stay white).
           initRealisticMaterialsIfNeeded().then(() => {
-            panelMeshes.forEach(p => {
+            targets.forEach(p => {
               if (!p || !p.isMesh) return;
               // BoxGeometry material order: [right, left, top, bottom, front, back] == [+X, -X, +Y, -Y, +Z, -Z]
               const mats = [_matPVFrame, _matPVFrame, _matPVTop, _matPVBottom, _matPVFrame, _matPVFrame];
@@ -2090,7 +2111,7 @@ if (wR) {
         }
 
         // Heatmap mode: restore per-panel unique MeshStandardMaterial so emissive coloring works.
-        panelMeshes.forEach(p => {
+        targets.forEach(p => {
           if (!p || !p.isMesh) return;
           if (Array.isArray(p.material)) {
             // Restore a single material instance
@@ -2239,17 +2260,13 @@ function daysInMonthUTC(year, month1to12) {
         }
       }
 
-      function getCurrentTotalPanels() {
-        // Prefer the *actual rendered geometry* count when available.
-        // This prevents drift when rebuildArrayGeometry() changes row counts, ridge logic,
-        // cloning/tiling behavior, or panel template composition.
+      function getBaseTotalPanels() {
+        // Base array ONLY (no tiling / no copies).
         try {
-          if (Array.isArray(panelMeshes) && panelMeshes.length > 0) {
-            return Math.max(0, panelMeshes.length | 0);
+          if (Array.isArray(basePanelMeshes) && basePanelMeshes.length > 0) {
+            return Math.max(0, basePanelMeshes.length | 0);
           }
-        } catch (e) {
-          // fall back to analytic estimate below
-        }
+        } catch (e) {}
 
         const type = (arrayTypeEl && arrayTypeEl.value === "roof") ? "roof" : "waves";
         let base = 0;
@@ -2264,19 +2281,30 @@ function daysInMonthUTC(year, month1to12) {
           base = Math.max(0, cols) * Math.max(0, rows);
         }
 
-        // Ground-only: multiply by array-of-arrays tiling counts (X/Y)
-        const surface = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
-        if (surface === "ground") {
-          const counts = getGroundTileCounts();
-          const tileX = Math.max(1, counts.x | 0);
-          const tileY = Math.max(1, counts.y | 0);
-          base *= (tileX * tileY);
-        }
-
         return Math.max(0, base | 0);
       }
 
-      // Expose for console debugging (script is inside an IIFE, so functions aren't on window by default)
+      function getArrayCopyMultiplier() {
+        const surface = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
+        if (surface === "water") {
+          const n = waterCopiesEl ? parseInt(waterCopiesEl.value || "1", 10) : 1;
+          return Math.max(1, n | 0);
+        }
+        // Ground: X×Y
+        const counts = getGroundTileCounts();
+        const tileX = Math.max(1, counts.x | 0);
+        const tileY = Math.max(1, counts.y | 0);
+        return Math.max(1, tileX * tileY);
+      }
+
+      function getCurrentTotalPanels() {
+        // Display-only total panels (base × copies).
+        return Math.max(0, (getBaseTotalPanels() | 0) * (getArrayCopyMultiplier() | 0));
+      }
+
+      // Expose for console debugging
+      try { window.getBaseTotalPanels = getBaseTotalPanels; } catch (_) {}
+      try { window.getArrayCopyMultiplier = getArrayCopyMultiplier; } catch (_) {}
       try { window.getCurrentTotalPanels = getCurrentTotalPanels; } catch (_) {}
 
       function ensureUniqueMaterial(mesh) {
@@ -2833,7 +2861,8 @@ for (const m of panelMeshes) {
         if (!Number.isFinite(max) || max === min) max = min + 1;
         snapshotColorRange = { min, max };
 
-        panelMeshes.forEach(mesh => {
+        const targets = (renderPanelMeshes && renderPanelMeshes.length) ? renderPanelMeshes : panelMeshes;
+        targets.forEach(mesh => {
           ensurePanelOrientationKey(mesh);
           const key = mesh.userData && mesh.userData.orientationKey;
           const entry = key ? orientationSnapshotMap.get(key) : null;
@@ -2945,7 +2974,8 @@ for (const m of panelMeshes) {
           return;
         }
         const targets = [];
-        panelMeshes.forEach(m => targets.push(m));
+        const panelsForPick = (renderPanelMeshes && renderPanelMeshes.length) ? renderPanelMeshes : panelMeshes;
+        panelsForPick.forEach(m => targets.push(m));
         if (groundMesh) targets.push(groundMesh);
         if (!targets.length) {
           hideTooltip();
@@ -3868,7 +3898,7 @@ window.__pvDebugHit = async (azDeg, elDeg) => {
         const az = clampAzimuth(parseInt(azimuthEl.value || "180", 10));
         const elev = parseFloat(elevationEl.value || "0.6");
         const tilt = type === "waves" ? 12.5 : parseFloat(roofTiltEl.value || "15");
-        const totalPanels = getCurrentTotalPanels();
+        const totalPanels = getBaseTotalPanels();
         // For roof arrays include rows/cols; for waves include panels per row.
         const extra = (type === "roof")
           ? ("r" + (roofRowsEl.value || "") + "_c" + (roofColsEl.value || ""))
@@ -4450,168 +4480,200 @@ function getWaterSizeMeters(activeGroup) {
 window.getWaterSizeMeters = getWaterSizeMeters;
 
 function updateGroundToArray(marginMeters) {
-        if (!groundMesh) return;
+  if (!groundMesh) return;
 
-        const margin = (typeof marginMeters === "number") ? marginMeters : 5;
+  const margin = (typeof marginMeters === "number") ? marginMeters : 5;
 
-        const surface = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
-        const counts = getGroundTileCounts();
+  const surface = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
+  const counts = getGroundTileCounts();
 
-        // Arrays-only object used for footprint measurement (must NOT include groundMesh).
-        // IMPORTANT: when ground tiling is active, groundTilingGroup contains ONLY the clones.
-        // The base array (wavesGroup/roofGroup) is separate, so bounds must UNION(base + clones).
-        const baseArray = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
-        const tilingActive = (surface === "ground" && groundTilingGroup && ((counts.x > 1) || (counts.y > 1)));
-        if (!baseArray) return;
+  // Arrays-only object used for footprint measurement (must NOT include groundMesh).
+  // IMPORTANT: when ground tiling is active, groundTilingGroup contains ONLY the clones.
+  // The base array (wavesGroup/roofGroup) is separate, so bounds must UNION(base + clones).
+  const baseArray = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
+  // Option A: include clones in FOOTPRINT sizing (for ground/water plane bounds),
+  // but never include them in simulation/shading calculations.
+  let waterCopies = 1;
+    try {
+      if (typeof waterCopiesEl !== "undefined" && waterCopiesEl) {
+        waterCopies = Math.max(1, parseInt(waterCopiesEl.value || "1", 10) | 0);
+      }
+    } catch (e) {}
+  const tilingActive =
+    (groundTilingGroup &&
+    ((surface === "ground" && ((counts.x > 1) || (counts.y > 1))) ||
+    (surface === "water"  && (waterCopies > 1))));
 
-        // We want a stable footprint size/center that does NOT "breathe" with azimuth.
-// Approach:
-// - Temporarily set the yaw-parent (tiledRoot) yaw to 0 so the footprint is axis-aligned.
-// - Measure the arrays-only bounds in that yaw=0 configuration.
-// - Convert the measured world-center into yaw-parent LOCAL space *while yaw=0*.
-// - Restore yaw; the ground mesh keeps its local position and rotates with the parent.
-const yawParent = (typeof tiledRoot !== "undefined" && tiledRoot) ? tiledRoot : (arrayGroup || scene);
+  if (!baseArray) return;
 
-const prevYaw = (yawParent && yawParent.rotation) ? yawParent.rotation.y : 0;
-const prevGroundVis = groundMesh.visible;
-groundMesh.visible = false; // safety: ensure the plane never contaminates footprint bounds
+    // We want a stable footprint size/center that does NOT "breathe" with azimuth.
+    // Approach:
+    // - Temporarily set the yaw-parent (tiledRoot) yaw to 0 so the footprint is axis-aligned.
+    // - Measure the arrays-only bounds in that yaw=0 configuration.
+    // - Convert the measured world-center into yaw-parent LOCAL space *while yaw=0*.
+    // - Restore yaw; the ground mesh keeps its local position and rotates with the parent.
+  const yawParent = (typeof tiledRoot !== "undefined" && tiledRoot) ? tiledRoot : (arrayGroup || scene);
 
-// Some builds also have shadow overlays; hide if present
-if (typeof shadowMesh !== "undefined" && shadowMesh) shadowMesh.visible = false;
-if (typeof shadowMesh2 !== "undefined" && shadowMesh2) shadowMesh2.visible = false;
+  const prevYaw = (yawParent && yawParent.rotation) ? yawParent.rotation.y : 0;
+  const prevGroundVis = groundMesh.visible;
+  groundMesh.visible = false; // safety: ensure the plane never contaminates footprint bounds
 
-if (yawParent && yawParent.rotation) yawParent.rotation.y = 0;
+  // Some builds also have shadow overlays; hide if present
+  if (typeof shadowMesh !== "undefined" && shadowMesh) shadowMesh.visible = false;
+  if (typeof shadowMesh2 !== "undefined" && shadowMesh2) shadowMesh2.visible = false;
 
-// Ensure matrices are up to date at yaw=0
-scene.updateMatrixWorld(true);
-yawParent.updateMatrixWorld(true);
+  if (yawParent && yawParent.rotation) yawParent.rotation.y = 0;
 
-// Compute bounds of arrays-only in world space (yaw=0 frame)
-const box = new THREE.Box3().setFromObject(baseArray);
-if (tilingActive) {
-  // Include all clones (but do not double-count groundMesh; it's hidden above)
-  try { box.expandByObject(groundTilingGroup); } catch (e) {}
-}
-if (!isFinite(box.min.x) || !isFinite(box.max.x)) {
-  // restore state
+  // Ensure matrices are up to date at yaw=0
+  scene.updateMatrixWorld(true);
+  yawParent.updateMatrixWorld(true);
+
+  // Compute bounds of arrays-only in world space (yaw=0 frame)
+  const box = new THREE.Box3().setFromObject(baseArray);
+  if (tilingActive) {
+    // Include all clones (but do not double-count groundMesh; it's hidden above)
+    try { box.expandByObject(groundTilingGroup); } catch (e) {}
+  }
+  if (!isFinite(box.min.x) || !isFinite(box.max.x)) {
+    // restore state
+    if (yawParent && yawParent.rotation) yawParent.rotation.y = prevYaw;
+    groundMesh.visible = prevGroundVis;
+    if (typeof shadowMesh !== "undefined" && shadowMesh) shadowMesh.visible = true;
+    if (typeof shadowMesh2 !== "undefined" && shadowMesh2) shadowMesh2.visible = true;
+    yawParent.updateMatrixWorld(true);
+    return;
+  }
+
+  const sizeW = new THREE.Vector3();
+  const centerW = new THREE.Vector3();
+  box.getSize(sizeW);
+  box.getCenter(centerW);
+
+  if (window.__SIZE_DEBUG_EVERY_UPDATE) {
+    console.log("[SIZE] footprint world size (m)", { x: sizeW.x, y: sizeW.y, z: sizeW.z }, "centerW", { x: centerW.x, y: centerW.y, z: centerW.z }, "surface", surface);
+  }
+
+  window.__lastFootprint = { surface: surface, x: sizeW.x, y: sizeW.y, z: sizeW.z, center: { x: centerW.x, y: centerW.y, z: centerW.z } };
+
+  // Convert world center -> yawParent local while yaw=0
+  const centerL = yawParent.worldToLocal(centerW.clone());
+
+  // Restore yaw and visibility
   if (yawParent && yawParent.rotation) yawParent.rotation.y = prevYaw;
   groundMesh.visible = prevGroundVis;
   if (typeof shadowMesh !== "undefined" && shadowMesh) shadowMesh.visible = true;
   if (typeof shadowMesh2 !== "undefined" && shadowMesh2) shadowMesh2.visible = true;
+  scene.updateMatrixWorld(true);
   yawParent.updateMatrixWorld(true);
-  return;
+
+  // Size (constant rim in both directions)
+  let sx = Math.max(1.0, sizeW.x + 2 * margin);
+  let sz = Math.max(1.0, sizeW.z + 2 * margin);
+
+  // Water mode sizing:
+  // - X (width) is ALWAYS the slider value (can be narrower or wider than the array footprint).
+  // - Z (length) follows array footprint + symmetric margin (like ground mode).
+  if (surface === "water") {
+  // Water sizing rule:
+  // - The *long* axis of the water plane follows the array footprint + symmetric margin.
+  // - The *short* axis is ALWAYS the slider value (can be narrower or wider than the array footprint).
+    const v = (typeof waterWidthM === "number" && isFinite(waterWidthM)) ? waterWidthM : 5.0;
+    const shortAxis = Math.max(0.01, v);
+
+    // Determine which footprint axis is "long" in the scene (handles canopy being modeled 90° vs waves).
+    const longIsX = (sizeW.x >= sizeW.z);
+
+    if (longIsX) {
+      // Long axis along X, slider controls Z width
+      sx = Math.max(1.0, sizeW.x + 2 * margin);
+      sz = shortAxis;
+    } else {
+    // Long axis along Z, slider controls X width
+      sx = shortAxis;
+      sz = Math.max(1.0, sizeW.z + 2 * margin);
+    }
+  }
+
+  // Update cached surface dimensions (used e.g. for water-area reporting to backend)
+  currentSurfaceSizeX = sx;
+  currentSurfaceSizeZ = sz;
+  currentWaterAreaM2 = (surface === "water") ? (sx * sz) : 0;
+
+  if (window.__SIZE_DEBUG_EVERY_UPDATE) {
+    console.log("[SIZE] surface plane dims (m)", {
+      surface,
+      sliderWaterWidthM: (typeof waterWidthM === "number" ? waterWidthM : null),
+      longIsX: (surface === "water") ? (sizeW.x >= sizeW.z) : null,
+      sx, sz,
+      water_area_m2: currentWaterAreaM2,
+      footprint_x: sizeW.x,
+      footprint_z: sizeW.z,
+      margin
+    });
+  }
+
+  // Place ground mesh at the footprint center in the yaw-parent's local coordinates
+  groundMesh.position.set(centerL.x, 0.0, centerL.z);
+
+  // Keep plane rotation purely in XZ (geometry is rotated), yaw comes from parent (tiledRoot).
+  groundMesh.rotation.set(-Math.PI / 2, 0, 0);
+
+  // Rebuild geometry to avoid non-uniform scaling artifacts
+  const prevGeom = groundMesh.geometry;
+  groundMesh.geometry = new THREE.PlaneGeometry(sx, sz);
+  if (prevGeom) prevGeom.dispose();
+
+  // Sync shadow sampling plane to ground
+  syncShadowPlaneToGround();
+
+  // Place the 3D North arrow just outside the ground plane on world-north (-Z).
+  if (northArrowGroup) {
+    // Compute arrow position in world using current yaw (prevYaw).
+    // Convert ground center to world
+    const centerWorldNow = new THREE.Vector3();
+    groundMesh.getWorldPosition(centerWorldNow);
+    // Extent along world -Z for a yawed rectangle
+    const yaw = prevYaw;
+    const extentZ = 0.5 * (Math.abs(sx * Math.sin(yaw)) + Math.abs(sz * Math.cos(yaw)));
+    northArrowGroup.position.set(centerWorldNow.x, 0.02, centerWorldNow.z - extentZ - 1.0);
+    }
+  }
+
+function resetCopyStateToOne() {
+  // Reset both ground and water copy controls and clear visual clones.
+  try {
+    if (groundArrayXEl) { groundArrayXEl.value = "1"; if (groundArrayXValEl) groundArrayXValEl.textContent = "1"; }
+    if (groundArrayYEl) { groundArrayYEl.value = "1"; if (groundArrayYValEl) groundArrayYValEl.textContent = "1"; }
+    if (typeof waterCopiesEl !== "undefined" && waterCopiesEl) {
+      waterCopiesEl.value = "1";
+      if (typeof waterCopiesValEl !== "undefined" && waterCopiesValEl) waterCopiesValEl.textContent = "1";
+    }
+  } catch (e) {}
+  try { clearGroundTilingClones(); } catch (e) {}
+  try {
+    panelMeshes = basePanelMeshes.slice();
+    renderPanelMeshes = basePanelMeshes.slice();
+  } catch (e) {}
+  try {
+    const liveGroup = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
+    if (liveGroup) { liveGroup.position.x = 0; liveGroup.position.z = 0; }
+  } catch (e) {}
+  try { updateGroundToArray(5); } catch (e) {}
 }
 
-const sizeW = new THREE.Vector3();
-const centerW = new THREE.Vector3();
-box.getSize(sizeW);
-box.getCenter(centerW);
+function formatLitersPerYear(litersPerYear) {
+  const v = Number(litersPerYear);
+  if (!Number.isFinite(v)) return "–";
 
-if (window.__SIZE_DEBUG_EVERY_UPDATE) {
-  console.log("[SIZE] footprint world size (m)", { x: sizeW.x, y: sizeW.y, z: sizeW.z }, "centerW", { x: centerW.x, y: centerW.y, z: centerW.z }, "surface", surface);
+  const abs = Math.abs(v);
+
+  if (abs >= 1e12) return (v / 1e12).toFixed(2) + " TL per year";
+  if (abs >= 1e9)  return (v / 1e9).toFixed(2)  + " GL per year";
+  if (abs >= 1e6)  return (v / 1e6).toFixed(2)  + " ML per year";
+  if (abs >= 1e3)  return (v / 1e3).toFixed(2)  + " kL per year";
+
+  return v.toFixed(0) + " Liters per year";
 }
-
-window.__lastFootprint = { surface: surface, x: sizeW.x, y: sizeW.y, z: sizeW.z, center: { x: centerW.x, y: centerW.y, z: centerW.z } };
-
-// Convert world center -> yawParent local while yaw=0
-const centerL = yawParent.worldToLocal(centerW.clone());
-
-// Restore yaw and visibility
-if (yawParent && yawParent.rotation) yawParent.rotation.y = prevYaw;
-groundMesh.visible = prevGroundVis;
-if (typeof shadowMesh !== "undefined" && shadowMesh) shadowMesh.visible = true;
-if (typeof shadowMesh2 !== "undefined" && shadowMesh2) shadowMesh2.visible = true;
-scene.updateMatrixWorld(true);
-yawParent.updateMatrixWorld(true);
-
-        // Size (constant rim in both directions)
-        let sx = Math.max(1.0, sizeW.x + 2 * margin);
-        let sz = Math.max(1.0, sizeW.z + 2 * margin);
-
-        // Water mode sizing:
-        // - X (width) is ALWAYS the slider value (can be narrower or wider than the array footprint).
-        // - Z (length) follows array footprint + symmetric margin (like ground mode).
-        if (surface === "water") {
-          // Water sizing rule:
-          // - The *long* axis of the water plane follows the array footprint + symmetric margin.
-          // - The *short* axis is ALWAYS the slider value (can be narrower or wider than the array footprint).
-          const v = (typeof waterWidthM === "number" && isFinite(waterWidthM)) ? waterWidthM : 5.0;
-          const shortAxis = Math.max(0.01, v);
-
-          // Determine which footprint axis is "long" in the scene (handles canopy being modeled 90° vs waves).
-          const longIsX = (sizeW.x >= sizeW.z);
-
-          if (longIsX) {
-            // Long axis along X, slider controls Z width
-            sx = Math.max(1.0, sizeW.x + 2 * margin);
-            sz = shortAxis;
-          } else {
-            // Long axis along Z, slider controls X width
-            sx = shortAxis;
-            sz = Math.max(1.0, sizeW.z + 2 * margin);
-          }
-        }
-
-
-        // Update cached surface dimensions (used e.g. for water-area reporting to backend)
-        currentSurfaceSizeX = sx;
-        currentSurfaceSizeZ = sz;
-        currentWaterAreaM2 = (surface === "water") ? (sx * sz) : 0;
-
-        if (window.__SIZE_DEBUG_EVERY_UPDATE) {
-          console.log("[SIZE] surface plane dims (m)", {
-            surface,
-            sliderWaterWidthM: (typeof waterWidthM === "number" ? waterWidthM : null),
-            longIsX: (surface === "water") ? (sizeW.x >= sizeW.z) : null,
-            sx, sz,
-            water_area_m2: currentWaterAreaM2,
-            footprint_x: sizeW.x,
-            footprint_z: sizeW.z,
-            margin
-          });
-        }
-
-        // Place ground mesh at the footprint center in the yaw-parent's local coordinates
-        groundMesh.position.set(centerL.x, 0.0, centerL.z);
-
-        // Keep plane rotation purely in XZ (geometry is rotated), yaw comes from parent (tiledRoot).
-        groundMesh.rotation.set(-Math.PI / 2, 0, 0);
-
-        // Rebuild geometry to avoid non-uniform scaling artifacts
-        const prevGeom = groundMesh.geometry;
-        groundMesh.geometry = new THREE.PlaneGeometry(sx, sz);
-        if (prevGeom) prevGeom.dispose();
-
-        // Sync shadow sampling plane to ground
-        syncShadowPlaneToGround();
-
-        // Place the 3D North arrow just outside the ground plane on world-north (-Z).
-        if (northArrowGroup) {
-          // Compute arrow position in world using current yaw (prevYaw).
-          // Convert ground center to world
-          const centerWorldNow = new THREE.Vector3();
-          groundMesh.getWorldPosition(centerWorldNow);
-          // Extent along world -Z for a yawed rectangle
-          const yaw = prevYaw;
-          const extentZ = 0.5 * (Math.abs(sx * Math.sin(yaw)) + Math.abs(sz * Math.cos(yaw)));
-          northArrowGroup.position.set(centerWorldNow.x, 0.02, centerWorldNow.z - extentZ - 1.0);
-        }
-      }
-
-      // Format annual water savings in liters per year
-      function formatLitersPerYear(litersPerYear) {
-        const v = Number(litersPerYear);
-        if (!Number.isFinite(v)) return "–";
-
-        const abs = Math.abs(v);
-
-        if (abs >= 1e12) return (v / 1e12).toFixed(2) + " TL per year";
-        if (abs >= 1e9)  return (v / 1e9).toFixed(2)  + " GL per year";
-        if (abs >= 1e6)  return (v / 1e6).toFixed(2)  + " ML per year";
-        if (abs >= 1e3)  return (v / 1e3).toFixed(2)  + " kL per year";
-
-        return v.toFixed(0) + " Liters per year";
-      }
 
       // Format annual energy in MWh
       function formatAnnual(mwh) {
@@ -4630,50 +4692,86 @@ yawParent.updateMatrixWorld(true);
         if (el) el.textContent = text;
       }
 
-      function applySimulationResultsToUI(data) {
-        try {
-          if (!data || typeof data !== "object") {
-            _setText("resultsStatus", "No results returned.");
-            return;
-          }
+function rescaleUiForCopyChange() {
+  // Re-apply cached base simulation results with the current copy multiplier (NO backend call).
+  try {
+    const base = window.__lastSimResponseBase || window.__lastSimResponse || null;
+    if (!base) {
+      try {
+        const totalPanels = getBaseTotalPanels();
+        _setText("metricPanels", Number.isFinite(totalPanels) ? String(totalPanels) : "-");
+      } catch (_) {}
+      // Rainwater UI-only refresh (if available)
+      try { window.__refreshRainwaterUIOnly && window.__refreshRainwaterUIOnly(); } catch (_) {}
+      return;
+    }
+  applySimulationResultsToUI(base);
+  try { window.__refreshRainwaterUIOnly && window.__refreshRainwaterUIOnly(); } catch (_) {}
+  } catch (e) {
+  console.warn("[UI] rescaleUiForCopyChange error", e);
+  }
+}
 
-          window.__lastSimResponse = data;
+function applySimulationResultsToUI(data) {
+  try {
+    if (!data || typeof data !== "object") {
+      _setText("resultsStatus", "No results returned.");
+      return;
+    }
 
-          try {
-            const totalPanels = getCurrentTotalPanels();
-            _setText("metricPanels", Number.isFinite(totalPanels) ? String(totalPanels) : "-");
-          } catch (_) {}
+    // Canonical: base-array-only response from backend
+    window.__lastSimResponseBase = data;
+    window.__lastSimResponse = data; // legacy consumers
 
-          // Annual energy: prefer shaded PV if present, else baseline annual_energy_kwh
-            const annualKwh =
-              (data?.annual_energy_kwh_shaded_pv != null)
-                ? Number(data.annual_energy_kwh_shaded_pv)
-                : (data?.annual_energy_kwh != null ? Number(data.annual_energy_kwh) : null);
+    const mult = (typeof window.getArrayCopyMultiplier === "function")
+    ? Math.max(1, window.getArrayCopyMultiplier() | 0)
+    : 1;
 
-          if (Number.isFinite(annualKwh)) {
-             const mwh = annualKwh / 1000.0;
-             _setText("metricAnnual", `${_fmtNumber(mwh, 2)} Megawatt-hour per year`);
-           } else {
-             _setText("metricAnnual", "–");
-           }
-          
-          const waterSavedLpy = data.water_saved_lpy;
-          const waterSavedPct = data.water_saved_pct != null ? Number(data.water_saved_pct) : null;
-          if (waterSavedLpy != null && Number.isFinite(Number(waterSavedLpy)) && Number(waterSavedLpy) > 0) {
-            _setText("metricWaterSaved", `${_fmtNumber(waterSavedLpy, 0)} Liters per year`);
-          } else if (waterSavedPct != null && Number.isFinite(waterSavedPct) && waterSavedPct > 0) {
-            _setText("metricWaterSaved", `${_fmtNumber(waterSavedPct, 1)}%`);
-          } else {
-            _setText("metricWaterSaved", "–");
-          }
- 
-            // Clear error UI on success
-            _setText("simError", "");
-        } catch (e) {
-        console.warn("[UI] applySimulationResultsToUI exception", e);
-        _setText("resultsStatus", "UI update error (see console).");
-        }
-      }
+    const scaled = Object.assign({}, data);
+    const mulNum = (k) => {
+      if (scaled[k] != null && Number.isFinite(Number(scaled[k]))) scaled[k] = Number(scaled[k]) * mult;
+    };
+    mulNum("annual_energy_kwh");
+    mulNum("annual_energy_kwh_shaded_pv");
+    mulNum("water_saved_lpy");
+
+    window.__lastSimResponseScaled = scaled;
+
+    try {
+      const totalPanels = getCurrentTotalPanels();
+      _setText("metricPanels", Number.isFinite(totalPanels) ? String(totalPanels) : "-");
+    } catch (_) {}
+
+    // Annual energy: prefer shaded PV if present, else baseline annual_energy_kwh
+    const annualKwh =
+    (scaled?.annual_energy_kwh_shaded_pv != null)
+    ? Number(scaled.annual_energy_kwh_shaded_pv)
+    : (scaled?.annual_energy_kwh != null ? Number(scaled.annual_energy_kwh) : null);
+
+    if (Number.isFinite(annualKwh)) {
+      const mwh = annualKwh / 1000.0;
+      _setText("metricAnnual", `${_fmtNumber(mwh, 2)} Megawatt-hour per year`);
+    } else {
+      _setText("metricAnnual", "–");
+    }
+
+    const waterSavedLpy = scaled.water_saved_lpy;
+    const waterSavedPct = scaled.water_saved_pct != null ? Number(scaled.water_saved_pct) : null;
+    if (waterSavedLpy != null && Number.isFinite(Number(waterSavedLpy)) && Number(waterSavedLpy) > 0) {
+      _setText("metricWaterSaved", `${_fmtNumber(waterSavedLpy, 0)} Liters per year`);
+    } else if (waterSavedPct != null && Number.isFinite(waterSavedPct) && waterSavedPct > 0) {
+      _setText("metricWaterSaved", `${_fmtNumber(waterSavedPct, 1)}%`);
+    } else {
+      _setText("metricWaterSaved", "–");
+    }
+
+    // Clear error UI on success
+    _setText("simError", "");
+    } catch (e) {
+    console.warn("[UI] applySimulationResultsToUI exception", e);
+    _setText("resultsStatus", "UI update error (see console).");
+  }
+}
 
       function estimateWaterSavingsLitersPerYear() {
         try {
@@ -4704,7 +4802,7 @@ yawParent.updateMatrixWorld(true);
           const metaIdx = parseInt(panelTypeEl.value || "0", 10);
           const meta = panelsMeta[metaIdx] || panelsMeta[0];
           const panelArea = (meta?.width_m || 1.0) * (meta?.height_m || 1.6);
-          const totalPanels = getCurrentTotalPanels();
+          const totalPanels = getBaseTotalPanels();
           const type = arrayTypeEl.value === "roof" ? "roof" : "waves";
           const azimuthDeg = clampAzimuth(parseInt(azimuthEl.value || "180", 10));
           const elev = parseFloat(elevationEl.value || "0") || 0;
@@ -5507,10 +5605,16 @@ function refreshBaseArrayPrototype() {
       };
 
 function updateGroundTilingVisibility() {
-        if (!groundTilingControlsEl) return;
-        const surface = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
-        groundTilingControlsEl.style.display = (surface === "ground") ? "block" : "none";
-      }
+  if (!groundTilingControlsEl) return;
+  const surface = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
+  groundTilingControlsEl.style.display = (surface === "ground") ? "block" : "none";
+}
+
+function updateWaterCopiesVisibility() {
+  if (!waterCopiesRowEl) return;
+  const surface = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
+  waterCopiesRowEl.style.display = (surface === "water") ? "block" : "none";
+}
 
       function _cloneWithFixedPanelUserData(root) {
         if (!root) return root;
@@ -5578,141 +5682,284 @@ function _cloneObject3DExcluding(src, excludeSet) {
 }
 
 
-      function applyGroundArrayTiling() {
-        if (!arrayGroup || !groundTilingGroup) return;
+function applyGroundArrayTiling() {
+  if (!arrayGroup || !groundTilingGroup) return;
 
-        const surf = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
-        const xCopies = groundArrayXEl ? Math.max(1, Math.min(10, parseInt(groundArrayXEl.value || "1", 10))) : 1;
-        const yCopies = groundArrayYEl ? Math.max(1, Math.min(10, parseInt(groundArrayYEl.value || "1", 10))) : 1;
+  const surf = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
+  const xCopies = groundArrayXEl ? Math.max(1, Math.min(10, parseInt(groundArrayXEl.value || "1", 10))) : 1;
+  const yCopies = groundArrayYEl ? Math.max(1, Math.min(10, parseInt(groundArrayYEl.value || "1", 10))) : 1;
 
-        dbgTiling("start", { surface: surf, x: xCopies, y: yCopies, arrayType: (arrayTypeEl ? arrayTypeEl.value : "?") });
+  dbgTiling("start", { surface: surf, x: xCopies, y: yCopies, arrayType: (arrayTypeEl ? arrayTypeEl.value : "?") });
 
-        // Guard against re-entrancy (range inputs can fire very rapidly)
-        if (applyGroundArrayTiling._busy) {
-          dbgTiling("skip (busy)");
-          return;
-        }
-        applyGroundArrayTiling._busy = true;
+  // Guard against re-entrancy (range inputs can fire very rapidly)
+  if (applyGroundArrayTiling._busy) {
+    dbgTiling("skip (busy)");
+    return;
+  }
+  applyGroundArrayTiling._busy = true;
 
-        try {
-          // Enforce hierarchy: tiling group must be a sibling under arrayGroup (never under waves/roof)
-          if (groundTilingGroup.parent !== tiledRoot) {
-            try { groundTilingGroup.parent && groundTilingGroup.parent.remove(groundTilingGroup); } catch (e) {}
-            tiledRoot.add(groundTilingGroup);
+  try {
+    // Enforce hierarchy: tiling group must be a sibling under arrayGroup (never under waves/roof)
+    if (groundTilingGroup.parent !== tiledRoot) {
+    try { groundTilingGroup.parent && groundTilingGroup.parent.remove(groundTilingGroup); } catch (e) {}
+      tiledRoot.add(groundTilingGroup);
+    }
+
+    const baseProto = baseArrayPrototype; // detached source
+    if (!baseProto) {
+      clearGroundTilingClones();
+      panelMeshes = basePanelMeshes.slice();
+      renderPanelMeshes = basePanelMeshes.slice();
+      return;
+    }
+
+    // Always clear previous clones (do NOT dispose while debugging to avoid shared-resource issues)
+    clearGroundTilingClones();
+
+    // Reset panel list back to the base array before adding clone panels
+    panelMeshes = basePanelMeshes.slice();        // base-only list (simulation)
+    renderPanelMeshes = basePanelMeshes.slice();  // base + clones (render/interaction)
+ 
+
+    if (surf !== "ground" || (xCopies === 1 && yCopies === 1)) {
+      dbgTiling("no tiling (surface or counts)");
+      // Reset live base array back to origin when not tiling
+      try {
+        const liveGroup = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
+        if (liveGroup) { liveGroup.position.x = 0; liveGroup.position.z = 0; }
+      } catch (e) {}
+      // Ensure any existing ground tiling clones are removed when leaving ground mode
+      clearGroundTilingClones();
+      panelMeshes = basePanelMeshes.slice();
+      return;
+    }
+
+  baseProto.updateMatrixWorld(true);
+
+  const yaw = getWorldYaw(baseProto);
+  const baseBox = new THREE.Box3().setFromObject(baseProto);
+  if (!isFinite(baseBox.min.x) || !isFinite(baseBox.max.x)) {
+    dbgTiling("abort: invalid base box");
+    return;
+  }
+
+  const fp = projectBoxToYawFrame(baseBox, yaw);
+  const sizeX = Math.max(0.01, fp.sizeX);
+  const sizeZ = Math.max(0.01, fp.sizeZ);
+  const stepX = sizeX + ARRAY_TILE_SPACING_M;
+  const stepZ = sizeZ + ARRAY_TILE_SPACING_M;
+
+  dbgTiling("footprint", { sizeX, sizeZ, stepX, stepZ, yaw_deg: (yaw * 180 / Math.PI) });
+
+  // Center the *entire* grid around the tiledRoot origin.
+  // We do this by shifting the live base array (wavesGroup/roofGroup) so that
+  // the (ix=0, iz=0) cell sits at the negative half-extent, and then placing
+  // clones at ix/iz steps from that.
+  const centerXCells = 0.5 * (xCopies - 1);
+  const centerZCells = 0.5 * (yCopies - 1);
+
+  const liveGroup = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
+
+  // Base cell (0,0) position in local tiledRoot coords (centered layout)
+  const baseCellX = -centerXCells * stepX;
+  const baseCellZ = -centerZCells * stepZ;
+
+  if (liveGroup) {
+    liveGroup.position.x = baseCellX;
+    liveGroup.position.z = baseCellZ;
+  }
+
+  let cloneCount = 0;
+  let clonePanels = 0;
+
+  for (let ix = 0; ix < xCopies; ix++) {
+    for (let iz = 0; iz < yCopies; iz++) {
+      if (ix === 0 && iz === 0) continue;
+
+        let clone = deepCloneWithout(baseProto, (node)=>{const ud=node&&node.userData?node.userData:null; return node===groundTilingGroup || (ud && (ud._isTilingContainer||ud._isTiledClone));});
+        // Fix clone materials/geometry/userData so textures render and disposal is safe.
+        clone = _cloneWithFixedPanelUserData(clone);
+        clone.userData = clone.userData || {};
+        clone.userData._isTiledClone = true;
+        clone.name = `tiled_${ix}_${iz}`;
+
+        // Place clone in centered grid layout (tiledRoot local).
+        const dx = baseCellX + ix * stepX;
+        const dz = baseCellZ + iz * stepZ;
+
+        clone.position.x = dx;
+        clone.position.z = dz;
+        groundTilingGroup.add(clone);
+        cloneCount++;
+
+        clone.traverse((o) => {
+          if (o && o.userData && o.userData.isPanel) {
+            o.userData._isClonePanel = true;
+            o.userData._isPvFace = true;
+            // IMPORTANT (Option A): clones must NOT enter the simulation mesh list.
+            // Keep them only in the render/interaction list.
+            renderPanelMeshes.push(o);
+            clonePanels++;
           }
+        });
+    }
+  }
 
-          const baseProto = baseArrayPrototype; // detached source
-          if (!baseProto) {
-            clearGroundTilingClones();
-            panelMeshes = basePanelMeshes.slice();
-            return;
-          }
+  // Resize ground to fit full tiled footprint (base + clones).
+  updateGroundToArray(5);
 
-          // Always clear previous clones (do NOT dispose while debugging to avoid shared-resource issues)
-          clearGroundTilingClones();
+  try {
+    applyRenderModeToPanels();
+  } catch(e) {
+    console.warn("applyRenderModeToPanels after ground tiling failed", e);
+  }
 
-          // Reset panel list back to the base array before adding clone panels
-          panelMeshes = basePanelMeshes.slice();
+  dbgTiling("done", { clones: cloneCount, clonePanels, totalPanels: renderPanelMeshes.length });
+  } catch (err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    console.error("[TILING] exception", { message: msg, stack: (err && err.stack) ? String(err.stack).slice(0, 2000) : "" });
 
-          if (surf !== "ground" || (xCopies === 1 && yCopies === 1)) {
-            dbgTiling("no tiling (surface or counts)");
-            // Reset live base array back to origin when not tiling
-            try {
-              const liveGroup = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
-              if (liveGroup) { liveGroup.position.x = 0; liveGroup.position.z = 0; }
-            } catch (e) {}
-            // Ensure any existing ground tiling clones are removed when leaving ground mode
-            clearGroundTilingClones();
-            panelMeshes = basePanelMeshes.slice();
-            return;
-          }
+    // Leave the scene in a safe state
+    try { clearGroundTilingClones(); } catch(e) {}
+    try { panelMeshes = basePanelMeshes.slice(); } catch(e) {}
 
-          baseProto.updateMatrixWorld(true);
-
-          const yaw = getWorldYaw(baseProto);
-          const baseBox = new THREE.Box3().setFromObject(baseProto);
-          if (!isFinite(baseBox.min.x) || !isFinite(baseBox.max.x)) {
-            dbgTiling("abort: invalid base box");
-            return;
-          }
-
-          const fp = projectBoxToYawFrame(baseBox, yaw);
-          const sizeX = Math.max(0.01, fp.sizeX);
-          const sizeZ = Math.max(0.01, fp.sizeZ);
-          const stepX = sizeX + ARRAY_TILE_SPACING_M;
-          const stepZ = sizeZ + ARRAY_TILE_SPACING_M;
-
-          dbgTiling("footprint", { sizeX, sizeZ, stepX, stepZ, yaw_deg: (yaw * 180 / Math.PI) });
-
-          // Center the *entire* grid around the tiledRoot origin.
-// We do this by shifting the live base array (wavesGroup/roofGroup) so that
-// the (ix=0, iz=0) cell sits at the negative half-extent, and then placing
-// clones at ix/iz steps from that.
-const centerXCells = 0.5 * (xCopies - 1);
-const centerZCells = 0.5 * (yCopies - 1);
-
-const liveGroup = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
-
-// Base cell (0,0) position in local tiledRoot coords (centered layout)
-const baseCellX = -centerXCells * stepX;
-const baseCellZ = -centerZCells * stepZ;
-
-if (liveGroup) {
-  liveGroup.position.x = baseCellX;
-  liveGroup.position.z = baseCellZ;
+    throw err;
+  } finally {
+    applyGroundArrayTiling._busy = false;
+  }
 }
 
-let cloneCount = 0;
-          let clonePanels = 0;
+function applyWaterArrayTiling() {
+  if (!arrayGroup || !groundTilingGroup) return;
 
-          for (let ix = 0; ix < xCopies; ix++) {
-            for (let iz = 0; iz < yCopies; iz++) {
-              if (ix === 0 && iz === 0) continue;
+  const surf = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
+  if (surf !== "water") return;
 
-              const clone = deepCloneWithout(baseProto, (node)=>{const ud=node&&node.userData?node.userData:null; return node===groundTilingGroup || (ud && (ud._isTilingContainer||ud._isTiledClone));});
-              clone.userData = clone.userData || {};
-              clone.userData._isTiledClone = true;
-              clone.name = `tiled_${ix}_${iz}`;
+  const nCopies = waterCopiesEl ? Math.max(1, Math.min(50, parseInt(waterCopiesEl.value || "1", 10))) : 1;
 
-              // Place clone in centered grid layout (tiledRoot local).
-const dx = baseCellX + ix * stepX;
-const dz = baseCellZ + iz * stepZ;
+  // Guard against re-entrancy
+  if (applyWaterArrayTiling._busy) return;
+  applyWaterArrayTiling._busy = true;
 
-clone.position.x = dx;
-clone.position.z = dz;
-groundTilingGroup.add(clone);
-              cloneCount++;
+  try {
+    // Enforce hierarchy
+    if (groundTilingGroup.parent !== tiledRoot) {
+      try { groundTilingGroup.parent && groundTilingGroup.parent.remove(groundTilingGroup); } catch (e) {}
+      tiledRoot.add(groundTilingGroup);
+    }
 
-              clone.traverse((o) => {
-                if (o && o.userData && o.userData.isPanel) {
-                  o.userData._isClonePanel = true;
-                  o.userData._isPvFace = true;
-                  panelMeshes.push(o);
-                  clonePanels++;
-                }
-              });
-            }
-          }
+  const baseProto = baseArrayPrototype;
+  if (!baseProto) {
+    clearGroundTilingClones();
+    // Option A: simulation must remain base-only
+    panelMeshes = basePanelMeshes.slice();
+    // Render/interaction list must include base + clones
+    renderPanelMeshes = basePanelMeshes.slice();
+    return;
+  }
 
-          // Resize ground to fit full tiled footprint (base + clones).
-          updateGroundToArray(5);
+  clearGroundTilingClones();
+  panelMeshes = basePanelMeshes.slice();        // base-only list (simulation)
+  renderPanelMeshes = basePanelMeshes.slice();  // base + clones (render/interaction)
+ 
 
-          dbgTiling("done", { clones: cloneCount, clonePanels, totalPanels: panelMeshes.length });
-        } catch (err) {
-          const msg = (err && err.message) ? err.message : String(err);
-          console.error("[TILING] exception", { message: msg, stack: (err && err.stack) ? String(err.stack).slice(0, 2000) : "" });
+  if (nCopies === 1) {
+    try {
+      const liveGroup = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
+      if (liveGroup) { liveGroup.position.x = 0; liveGroup.position.z = 0; }
+    } catch (e) {}
+    return;
+  }
 
-          // Leave the scene in a safe state
-          try { clearGroundTilingClones(); } catch(e) {}
-          try { panelMeshes = basePanelMeshes.slice(); } catch(e) {}
+  baseProto.updateMatrixWorld(true);
+  const yaw = getWorldYaw(baseProto);
+  const baseBox = new THREE.Box3().setFromObject(baseProto);
+  if (!isFinite(baseBox.min.x) || !isFinite(baseBox.max.x)) return;
 
-          throw err;
-        } finally {
-          applyGroundArrayTiling._busy = false;
-        }
+  const fp = projectBoxToYawFrame(baseBox, yaw);
+  const sizeX = Math.max(0.01, fp.sizeX);
+  const sizeZ = Math.max(0.01, fp.sizeZ);
+
+  // Heuristic: tile along the longer footprint axis (approx. canal direction)
+  const alongX = (sizeX >= sizeZ);
+  // ------------------------------------------------------------
+  // SPACING RULES
+  // Solar Waves over water should form one continuous structure.
+  // Canopies keep spacing.
+  // Ground behaviour remains unchanged (handled elsewhere).
+  // ------------------------------------------------------------
+
+  const arrayType = (arrayTypeEl && arrayTypeEl.value === "roof")
+    ? "roof"
+    : "waves";
+
+  const spacing =
+    (arrayType === "waves")
+      ? 0.0              // ← remove spacing for Solar Waves
+      : ARRAY_TILE_SPACING_M; // ← keep canopy spacing
+
+  const step = (alongX ? sizeX : sizeZ) + spacing;
+
+  const centerCells = 0.5 * (nCopies - 1);
+
+  const liveGroup = (wavesGroup && wavesGroup.visible) ? wavesGroup : roofGroup;
+  const baseCellX = alongX ? (-centerCells * step) : 0;
+  const baseCellZ = alongX ? 0 : (-centerCells * step);
+
+  if (liveGroup) {
+    liveGroup.position.x = baseCellX;
+    liveGroup.position.z = baseCellZ;
+  }
+
+  for (let i = 0; i < nCopies; i++) {
+    if (i === 0) continue;
+
+   let clone = deepCloneWithout(baseProto, (node)=> {
+      const ud = node && node.userData ? node.userData : null;
+      return node === groundTilingGroup || (ud && (ud._isTilingContainer || ud._isTiledClone));
+    });
+    // Fix clone meshes so they have independent geometry/material and prepared panel userData
+    clone = _cloneWithFixedPanelUserData(clone);
+    clone.userData = clone.userData || {};
+    clone.userData._isTiledClone = true;
+    clone.name = `water_tiled_${i}`;
+
+    const d = (i * step);
+    clone.position.x = baseCellX + (alongX ? d : 0);
+    clone.position.z = baseCellZ + (alongX ? 0 : d);
+
+    groundTilingGroup.add(clone);
+
+    // IMPORTANT (Option A): clones must NOT enter the simulation mesh list.
+    // Keep them only in the render/interaction list.
+    clone.traverse((o) => {
+      if (o && o.userData && o.userData.isPanel) {
+        o.userData._isClonePanel = true;
+        o.userData._isPvFace = true;
+        // IMPORTANT (Option A): clones must NOT enter the simulation mesh list.
+        renderPanelMeshes.push(o);
       }
+    });
+  }
 
-      function rebuildArrayGeometry() {
+  // Ensure clones receive current render mode materials/textures AFTER they exist
+  try { applyRenderModeToPanels(); } catch(e) {
+    console.warn("applyRenderModeToPanels after water tiling failed", e);
+  }
+
+  try {
+    applyRenderModeToPanels();
+    } catch(e) {
+    console.warn("applyRenderModeToPanels after water tiling failed", e);
+  }
+  } catch (e) {
+  console.warn("[tiling] applyWaterArrayTiling error", e);
+  } finally {
+  applyWaterArrayTiling._busy = false;
+  }
+}
+
+function rebuildArrayGeometry() {
   if (!__firstVisualReady) setLoadingStatus("Building solar array…");
   invalidateWaterState("rebuildArrayGeometry");
   if (!arrayGroup) return;
@@ -5758,7 +6005,7 @@ groundTilingGroup.add(clone);
   const elevation = parseFloat(elevationEl.value || "0.6");
   const azDeg = clampAzimuth(parseInt(azimuthEl.value || "180", 10));
 
-          // updateCompass removed (3D north arrow used instead)
+  // updateCompass removed (3D north arrow used instead)
 
   const type = arrayTypeEl.value === "roof" ? "roof" : "waves";
   if (type === "waves") {
@@ -5773,13 +6020,77 @@ groundTilingGroup.add(clone);
 
   // Capture base panel list before adding any tiled clones
   basePanelMeshes = panelMeshes.slice();
+  // Render list starts as base list; tiling functions append clones into renderPanelMeshes only.
+  renderPanelMeshes = basePanelMeshes.slice();
+ 
 
   // Build a detached clone source for tiling (prevents scene graph recursion)
   refreshBaseArrayPrototype();
 
+  try {
+    if (surfaceTypeEl && surfaceTypeEl.value === "water") {
+      applyWaterArrayTiling();
+    } else {
+      applyGroundArrayTiling();
+    }
+  } catch(e) {
+    console.warn("reapply tiling after rebuild failed", e);
+  }
+
+  // Ensure materials applied AFTER clones exist
+  try {
+    applyRenderModeToPanels();
+  } catch(e) {
+    console.warn("applyRenderModeToPanels after rebuild failed", e);
+  }
+
   // Ground-only: duplicate the array in an X×Y grid (array-of-arrays)
   updateGroundTilingVisibility();
-  applyGroundArrayTiling();
+  ((surfaceTypeEl && String(surfaceTypeEl.value).toLowerCase() === "water")
+     ? applyWaterArrayTiling
+     : applyGroundArrayTiling)();
+
+  // ------------------------------------------------------------
+  // Option 1 — Robust Over-Water Retile Guard
+  // Rebuild water copies after ANY geometry rebuild.
+  // Prevents copies disappearing when panels/azimuth change.
+  // requestAnimationFrame ensures:
+  //   • baseArrayPrototype is ready
+  //   • tiling _busy guards are cleared
+  //   • materials can be safely reapplied
+  // ------------------------------------------------------------
+  try {
+    const surf =
+      (surfaceTypeEl && surfaceTypeEl.value)
+        ? String(surfaceTypeEl.value).toLowerCase()
+        : "ground";
+
+    if (surf === "water" && typeof waterCopiesEl !== "undefined" && waterCopiesEl) {
+      const nCopies = Math.max(1, parseInt(waterCopiesEl.value || "1", 10));
+
+      if (nCopies > 1) {
+        requestAnimationFrame(() => {
+          try {
+            applyWaterArrayTiling();
+            updateGroundToArray(5);
+
+            if (typeof rescaleUiForCopyChange === "function") {
+              rescaleUiForCopyChange();
+            }
+
+            if (typeof applyRenderModeToPanels === "function") {
+              applyRenderModeToPanels();
+            }
+
+          } catch (e) {
+            console.warn("[rebuild] water retile failed", e);
+          }
+        });
+      }
+    }
+  } catch (e) {
+    console.warn("[rebuild] water retile guard error", e);
+  }
 
   // Resize ground to fit the new geometry (approx. 5m margin)
   updateGroundToArray(5);
@@ -5856,7 +6167,7 @@ async function runSimulationAndUpdateUI() {
     const meta = panelsMeta[metaIdx] || panelsMeta[0];
     if (!meta) throw new Error("Panel metadata not loaded.");
 
-    const totalPanels = getCurrentTotalPanels();
+    const totalPanels = getBaseTotalPanels();
     const year = lastFullYear();
 
     // -------------------------
@@ -6296,7 +6607,6 @@ function maybeSetEquatorFacingAzimuth() {
           locationStatusEl.textContent = "Selected via " + provider + (res.display_name ? (": " + res.display_name) : ".");
         }
         maybeSetEquatorFacingAzimuth();
-        maybeSetEquatorFacingAzimuth();
         rebuildArrayGeometry();
           updateGroundToArray(5);
           if (surfaceTypeEl && surfaceTypeEl.value === "water") invalidateWaterState("arrayChange");
@@ -6379,8 +6689,10 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
             elevationValEl.textContent = "0.6 m";
           }
 
+          // Any array-type switch should rebuild a single base array (copies reset to 1).
+          resetCopyStateToOne();
           maybeSetEquatorFacingAzimuth();
-        rebuildArrayGeometry();
+          rebuildArrayGeometry();
           updateGroundToArray(5);
           if (surfaceTypeEl && surfaceTypeEl.value === "water") invalidateWaterState("arrayChange");
           scheduleSimulation();
@@ -6388,8 +6700,9 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
 
         panelTypeEl.addEventListener("change", () => {
           updatePanelMetaDisplay();
+          resetCopyStateToOne();
           maybeSetEquatorFacingAzimuth();
-        rebuildArrayGeometry();
+          rebuildArrayGeometry();
           updateGroundToArray(5);
           if (surfaceTypeEl && surfaceTypeEl.value === "water") invalidateWaterState("arrayChange");
           scheduleSimulation();
@@ -6398,7 +6711,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
         wavesPanelsPerRowEl.addEventListener("input", () => {
           wavesPanelsPerRowValEl.textContent = wavesPanelsPerRowEl.value;
           maybeSetEquatorFacingAzimuth();
-        rebuildArrayGeometry();
+          rebuildArrayGeometry();
           updateGroundToArray(5);
           if (surfaceTypeEl && surfaceTypeEl.value === "water") invalidateWaterState("arrayChange");
           scheduleSimulation();
@@ -6407,7 +6720,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
         roofColsEl.addEventListener("input", () => {
           roofColsValEl.textContent = roofColsEl.value;
           maybeSetEquatorFacingAzimuth();
-        rebuildArrayGeometry();
+          rebuildArrayGeometry();
           updateGroundToArray(5);
           if (surfaceTypeEl && surfaceTypeEl.value === "water") invalidateWaterState("arrayChange");
           scheduleSimulation();
@@ -6416,7 +6729,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
         roofRowsEl.addEventListener("input", () => {
           roofRowsValEl.textContent = roofRowsEl.value;
           maybeSetEquatorFacingAzimuth();
-        rebuildArrayGeometry();
+          rebuildArrayGeometry();
           updateGroundToArray(5);
           if (surfaceTypeEl && surfaceTypeEl.value === "water") invalidateWaterState("arrayChange");
           scheduleSimulation();
@@ -6425,7 +6738,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
         roofTiltEl.addEventListener("input", () => {
           roofTiltValEl.textContent = roofTiltEl.value + "°";
           maybeSetEquatorFacingAzimuth();
-        rebuildArrayGeometry();
+          rebuildArrayGeometry();
           updateGroundToArray(5);
           if (surfaceTypeEl && surfaceTypeEl.value === "water") invalidateWaterState("arrayChange");
           scheduleSimulation();
@@ -6468,15 +6781,25 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
           });
         }
 
+        if (waterCopiesEl) {
+          waterCopiesEl.addEventListener("input", () => {
+            const n = Math.max(1, Math.min(50, parseInt(waterCopiesEl.value || "1", 10)));
+            waterCopiesEl.value = String(n);
+            if (waterCopiesValEl) waterCopiesValEl.textContent = String(n);
+            applyWaterArrayTiling();
+            updateGroundToArray(5);
+            rescaleUiForCopyChange();
+          });
+        }
         
         // Ground-only array-of-arrays controls
         if (groundArrayXEl && groundArrayXValEl) {
           groundArrayXValEl.textContent = String(parseInt(groundArrayXEl.value || "1", 10));
           groundArrayXEl.addEventListener("input", () => {
             groundArrayXValEl.textContent = String(parseInt(groundArrayXEl.value || "1", 10));
-            rebuildArrayGeometry();
+            applyGroundArrayTiling();
             updateGroundToArray(5);
-            scheduleSimulation();
+            rescaleUiForCopyChange();
           });
         }
 
@@ -6484,9 +6807,9 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
           groundArrayYValEl.textContent = String(parseInt(groundArrayYEl.value || "1", 10));
           groundArrayYEl.addEventListener("input", () => {
             groundArrayYValEl.textContent = String(parseInt(groundArrayYEl.value || "1", 10));
-            rebuildArrayGeometry();
+            applyGroundArrayTiling();
             updateGroundToArray(5);
-            scheduleSimulation();
+            rescaleUiForCopyChange();
           });
         }
 
@@ -6498,6 +6821,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
           const __surfNow = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
           const __ctl = document.getElementById("groundTilingControls");
           if (__ctl) __ctl.style.display = (__surfNow === "ground") ? "" : "none";
+          if (waterCopiesRowEl) waterCopiesRowEl.style.display = (__surfNow === "water") ? "block" : "none";
 
           // Reset any ground tiling when switching between Ground/Water.
           // - Over Water: remove clones and keep a single base array.
@@ -6505,12 +6829,17 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
           try {
             if (groundArrayXEl) { groundArrayXEl.value = "1"; if (groundArrayXValEl) groundArrayXValEl.textContent = "1"; }
             if (groundArrayYEl) { groundArrayYEl.value = "1"; if (groundArrayYValEl) groundArrayYValEl.textContent = "1"; }
+            if (__surfNow === "ground" && waterCopiesEl) { waterCopiesEl.value = "1"; if (waterCopiesValEl) waterCopiesValEl.textContent = "1"; }
           } catch (e) {}
           try { clearGroundTilingClones(); } catch (e) {}
           try { panelMeshes = basePanelMeshes.slice(); } catch (e) {}
+          // Any surface switch should rebuild a single base array (copies reset to 1).
+          resetCopyStateToOne();
+
           if (currentRenderMode === 'textures') {
             const isWater = surfaceTypeEl.value === "water";
             if (waterWidthRowEl) waterWidthRowEl.style.display = isWater ? "block" : "none";
+            if (waterCopiesRowEl) waterCopiesRowEl.style.display = isWater ? "block" : "none";
             if (isWater && waterWidthEl && waterWidthValEl) {
               const v = Math.min(20.0, Math.max(1.0, parseFloat(waterWidthEl.value || String(waterWidthM || 5.0))));
               waterWidthM = v;
@@ -6520,6 +6849,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
             updateGroundToArray(5);
             if (shadowOverlayMesh) shadowOverlayMesh.visible = false;
             applyRenderModeToGround();
+            if (surfaceTypeEl && surfaceTypeEl.value === "water") { try { applyWaterArrayTiling(); } catch (e) {} };
             scheduleSimulation();
             return;
           }
@@ -6527,14 +6857,15 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
           if (groundMesh && groundMesh.material && groundMesh.material.color) {
             const isWater = surfaceTypeEl.value === "water";
 
-            // Toggle water width control visibility
-            if (waterWidthRowEl) waterWidthRowEl.style.display = isWater ? "block" : "none";
-            if (isWater && waterWidthEl && waterWidthValEl) {
-              const v = Math.min(20.0, Math.max(1.0, parseFloat(waterWidthEl.value || String(waterWidthM || 5.0))));
-              waterWidthM = v;
-              waterWidthEl.value = String(v);
-              waterWidthValEl.textContent = v.toFixed(1) + " m";
-            }
+          // Toggle water controls visibility
+          if (waterWidthRowEl) waterWidthRowEl.style.display = isWater ? "block" : "none";
+          if (waterCopiesRowEl) waterCopiesRowEl.style.display = isWater ? "block" : "none";
+          if (isWater && waterWidthEl && waterWidthValEl) {
+            const v = Math.min(20.0, Math.max(1.0, parseFloat(waterWidthEl.value || String(waterWidthM || 5.0))));
+            waterWidthM = v;
+            waterWidthEl.value = String(v);
+            waterWidthValEl.textContent = v.toFixed(1) + " m";
+          }
             
             // Remove any shadow texture when leaving Water mode.
             if (!isWater && groundMesh && groundMesh.material && groundMesh.material.map === groundShadowTexture) {
@@ -6547,6 +6878,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
           // Ensure UI reflects Ground-only tiling controls, and rebuild geometry so any prior clones
           // are cleared when switching to Water (or applied again when switching back to Ground).
           updateGroundTilingVisibility();
+          updateWaterCopiesVisibility();
           rebuildArrayGeometry();
 
           // Ensure plane continues to fit the array (e.g., after switching array type)
@@ -6556,6 +6888,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
           if (shadowOverlayMesh) {
             shadowOverlayMesh.visible = false;
           }
+          if (surfaceTypeEl && surfaceTypeEl.value === "water") { try { applyWaterArrayTiling(); } catch (e) {} }
           scheduleSimulation();
         });
 
@@ -6581,7 +6914,7 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
                 const arrayType = arrayTypeEl.value === "roof" ? "roof" : "waves";
                 const azUiDeg = clampAzimuth(parseInt(azimuthEl.value || "180", 10));
                 const azDeg = azimuthForBackend(azUiDeg, arrayType);
-                const totalPanels = getCurrentTotalPanels();
+                const totalPanels = getBaseTotalPanels();
 
 
                 const payload = {
@@ -6890,7 +7223,10 @@ window.dumpSizes = function dumpSizes() {
       const y = data.year;
 
       if (Number.isFinite(m3) && Number.isFinite(L)) {
-        valueEl.textContent = `${fmt0(L)} Liters per year`;
+        // Cache base (single-array) rainwater so UI can multiply for visual copies without refetching.
+        window.__rainwaterLitersBase = L;
+        const mult = (typeof window.getArrayCopyMultiplier === "function") ? window.getArrayCopyMultiplier() : 1;
+        valueEl.textContent = `${fmt0(L * Math.max(1, mult))} Liters per year`;
       } else {
         valueEl.textContent = "–";
       }
@@ -6927,6 +7263,17 @@ window.dumpSizes = function dumpSizes() {
   }
 
   const iv = setInterval(tick, 750);
+
+  // Allow copy sliders to re-render the displayed total without refetching.
+  window.__refreshRainwaterUIOnly = () => {
+    try {
+      const L0 = Number(window.__rainwaterLitersBase);
+      if (!Number.isFinite(L0)) return;
+      const mult = (typeof window.getArrayCopyMultiplier === "function") ? window.getArrayCopyMultiplier() : 1;
+      valueEl.textContent = `${fmt0(L0 * Math.max(1, mult))} Liters per year`;
+    } catch (_) {}
+  };
+
   setTimeout(tick, 600);
 
   document.getElementById("arrayType")?.addEventListener("change", () => {
