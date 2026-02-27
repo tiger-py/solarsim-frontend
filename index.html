@@ -651,7 +651,7 @@
               <span>Number of Arrays (along canal)</span>
               <span class="value"><span id="waterCopiesVal">1</span></span>
             </div>
-            <input id="waterCopies" max="50" min="1" step="1" type="range" value="1"/>
+            <input id="waterCopies" max="10" min="1" step="1" type="range" value="1"/>
           </div>
 
           <div id="simError"></div>
@@ -5786,7 +5786,13 @@ function applyWaterArrayTiling() {
   const surf = (surfaceTypeEl && surfaceTypeEl.value) ? String(surfaceTypeEl.value).toLowerCase() : "ground";
   if (surf !== "water") return;
 
-  const nCopies = waterCopiesEl ? Math.max(1, Math.min(50, parseInt(waterCopiesEl.value || "1", 10))) : 1;
+  // Single source of truth for perf caps / slider max values.
+  // Ground cap already applied elsewhere (5). Keep water at 50 unless you change it here.
+  const WATER_COPIES_MAX = 10;
+
+  const nCopies = waterCopiesEl
+    ? Math.max(1, Math.min(WATER_COPIES_MAX, parseInt(waterCopiesEl.value || "1", 10)))
+    : 1;
 
   // Guard against re-entrancy
   if (applyWaterArrayTiling._busy) return;
@@ -6784,8 +6790,13 @@ async function searchAndMaybeSelectLocation(query, isInitial = false) {
         }
 
         if (waterCopiesEl) {
+          // Keep DOM max in sync even if HTML gets edited elsewhere.
+          try { waterCopiesEl.max = String(10); } catch (e) {}
+          
           waterCopiesEl.addEventListener("input", () => {
-            const n = Math.max(1, Math.min(50, parseInt(waterCopiesEl.value || "1", 10)));
+            // Match applyWaterArrayTiling() clamp so copies never silently break.
+            const WATER_COPIES_MAX = 50;
+            const n = Math.max(1, Math.min(WATER_COPIES_MAX, parseInt(waterCopiesEl.value || "1", 10)));
             waterCopiesEl.value = String(n);
             if (waterCopiesValEl) waterCopiesValEl.textContent = String(n);
             applyWaterArrayTiling();
